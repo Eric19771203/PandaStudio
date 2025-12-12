@@ -3409,68 +3409,212 @@
                     // 2. { status: "SUCCESS", data: { data: [{ url: "..." }] } }
                     // 3. { task_id: "...", status: "SUCCESS", data: { data: [{ url: "..." }] } }
                     const status = (data?.data?.status || data?.status || '').toUpperCase();
+                    console.log('[Async Image] 提取的状态:', status, '原始数据:', { 
+                        hasData: !!data?.data, 
+                        hasDataData: !!data?.data?.data,
+                        hasDataStatus: !!data?.data?.status,
+                        hasStatus: !!data?.status,
+                        dataKeys: data ? Object.keys(data) : []
+                    });
+                    
                     let images = [];
                     
-                    // 尝试多种方式提取图片数据
-                    if (data?.data?.images && Array.isArray(data.data.images)) {
-                        images = data.data.images;
-                    } else if (data?.data?.data && Array.isArray(data.data.data)) {
-                        // 嵌套格式：data.data 是图片数组
+                    // 尝试多种方式提取图片数据（按优先级顺序）
+                    // 方式1：data.data.data（嵌套格式，最常见）
+                    if (data?.data?.data && Array.isArray(data.data.data) && data.data.data.length > 0) {
                         images = data.data.data;
-                    } else if (data?.images && Array.isArray(data.images)) {
+                        console.log('[Async Image] 从 data.data.data 提取到图片:', images.length, '张');
+                    }
+                    // 方式2：data.data.images
+                    else if (data?.data?.images && Array.isArray(data.data.images) && data.data.images.length > 0) {
+                        images = data.data.images;
+                        console.log('[Async Image] 从 data.data.images 提取到图片:', images.length, '张');
+                    }
+                    // 方式3：data.images
+                    else if (data?.images && Array.isArray(data.images) && data.images.length > 0) {
                         images = data.images;
-                    } else if (data?.data && Array.isArray(data.data)) {
+                        console.log('[Async Image] 从 data.images 提取到图片:', images.length, '张');
+                    }
+                    // 方式4：data.data（标准OpenAI格式）
+                    else if (data?.data && Array.isArray(data.data) && data.data.length > 0) {
                         images = data.data;
+                        console.log('[Async Image] 从 data.data 提取到图片:', images.length, '张');
+                    }
+                    
+                    // 如果还是没有找到图片，尝试从revised_prompt中提取URL（备用方案）
+                    if (images.length === 0) {
+                        // 尝试从data.data.data[0].revised_prompt中提取
+                        if (data?.data?.data && Array.isArray(data.data.data) && data.data.data.length > 0) {
+                            const firstItem = data.data.data[0];
+                            if (firstItem?.revised_prompt) {
+                                const urlMatch = firstItem.revised_prompt.match(/!\[.*?\]\((https?:\/\/[^\s\)]+)\)/);
+                                if (urlMatch && urlMatch[1]) {
+                                    images = [{ url: urlMatch[1] }];
+                                    console.log('[Async Image] 从 revised_prompt 中提取到图片URL:', urlMatch[1]);
+                                }
+                            }
+                        }
+                        // 尝试从data.data.revised_prompt中提取
+                        if (images.length === 0 && data?.data?.revised_prompt) {
+                            const urlMatch = data.data.revised_prompt.match(/!\[.*?\]\((https?:\/\/[^\s\)]+)\)/);
+                            if (urlMatch && urlMatch[1]) {
+                                images = [{ url: urlMatch[1] }];
+                                console.log('[Async Image] 从 data.data.revised_prompt 中提取到图片URL:', urlMatch[1]);
+                            }
+                        }
+                        // 最后尝试：如果data.data.data存在但images为空，可能是数据结构问题，直接使用data.data.data
+                        if (images.length === 0 && data?.data?.data && Array.isArray(data.data.data) && data.data.data.length > 0) {
+                            // 检查每个元素是否有url字段
+                            const itemsWithUrl = data.data.data.filter(item => item?.url || item?.image_url || item?.imageUrl);
+                            if (itemsWithUrl.length > 0) {
+                                images = itemsWithUrl;
+                                console.log('[Async Image] 从 data.data.data 中重新提取到图片（二次尝试）:', images.length, '张');
+                            }
+                        }
                     }
                     
                     const errorMsg = data?.message || data?.error || data?.fail_reason || '';
 
                     // 更新历史记录
-                    setHistory((prev) => prev.map((hItem) => {
-                        if (hItem.id === taskId) {
-                            // 支持多种成功状态值
-                            if (status === 'COMPLETED' || status === 'SUCCESS' || status === 'FINISHED' || status === 'DONE') {
-                                // 任务完成
-                                if (images && images.length > 0) {
-                                    // 提取图片URL，支持多种字段名和格式
-                                    const imageUrls = images.map(img => {
-                                        if (typeof img === 'string') return img;
-                                        return img?.url || img?.image_url || img?.imageUrl || '';
-                                    }).filter(Boolean);
+                    setHistory((prev) => {
+                        const updated = prev.map((hItem) => {
+                            if (hItem.id === taskId) {
+                                // 支持多种成功状态值
+                                if (status === 'COMPLETED' || status === 'SUCCESS' || status === 'FINISHED' || status === 'DONE') {
+                                    console.log('[Async Image] 任务状态为成功:', status, '图片数量:', images.length);
                                     
-                                    if (imageUrls.length > 0) {
-                                        const primaryUrl = imageUrls[0];
-                                        const endTime = Date.now();
-                                        const durationMs = endTime - (hItem.startTime || endTime);
+                                    // 保存sourceNodeId，用于后续更新预览窗口
+                                    const savedSourceNodeId = hItem.sourceNodeId || sourceNodeId;
+                                    
+                                    // 任务完成
+                                    if (images && images.length > 0) {
+                                        // 提取图片URL，支持多种字段名和格式
+                                        const imageUrls = images.map(img => {
+                                            if (typeof img === 'string') return img;
+                                            return img?.url || img?.image_url || img?.imageUrl || '';
+                                        }).filter(Boolean);
                                         
-                                        // 更新预览窗口
-                                        if (sourceNodeId) {
+                                        console.log('[Async Image] 提取到的图片URLs:', imageUrls);
+                                        
+                                        if (imageUrls.length > 0) {
+                                            const primaryUrl = imageUrls[0];
+                                            const endTime = Date.now();
+                                            const durationMs = endTime - (hItem.startTime || endTime);
+                                            
+                                            console.log('[Async Image] 任务完成，准备更新UI:', { 
+                                                taskId, 
+                                                url: primaryUrl, 
+                                                sourceNodeId: savedSourceNodeId, 
+                                                imageCount: imageUrls.length,
+                                                durationMs 
+                                            });
+                                            
+                                            // 更新预览窗口（在setHistory回调外执行，使用保存的sourceNodeId）
+                                            // 即使savedSourceNodeId为空，也尝试调用updatePreviewFromTask，它会从history中查找
                                             setTimeout(() => {
-                                                console.log('[Async Image] 准备更新预览窗口', { taskId, url: primaryUrl, sourceNodeId, imageCount: imageUrls.length });
-                                                updatePreviewFromTask(taskId, primaryUrl, 'image', sourceNodeId, imageUrls.length > 1 ? imageUrls : null);
-                                            }, 0);
+                                                const nodeIdToUse = savedSourceNodeId || hItem.sourceNodeId;
+                                                console.log('[Async Image] 准备更新预览窗口', { 
+                                                    taskId, 
+                                                    url: primaryUrl, 
+                                                    sourceNodeId: nodeIdToUse, 
+                                                    savedSourceNodeId,
+                                                    hItemSourceNodeId: hItem.sourceNodeId,
+                                                    imageCount: imageUrls.length 
+                                                });
+                                                updatePreviewFromTask(taskId, primaryUrl, 'image', nodeIdToUse, imageUrls.length > 1 ? imageUrls : null);
+                                            }, 200); // 延迟执行，确保history已更新
+                                            
+                                            return { 
+                                                ...hItem, 
+                                                status: 'completed', 
+                                                progress: 100, 
+                                                url: primaryUrl,
+                                                width: w,
+                                                height: h,
+                                                durationMs,
+                                                errorMsg: null,
+                                                sourceNodeId: savedSourceNodeId || hItem.sourceNodeId, // 确保sourceNodeId被保留
+                                                ...(imageUrls.length > 1 ? { mjImages: imageUrls, selectedMjImageIndex: 0 } : {})
+                                            };
+                                        } else {
+                                            console.error('[Async Image] 图片数组为空或无法提取URL:', images);
                                         }
+                                    } else {
+                                        console.error('[Async Image] 任务完成但未找到图片数据，尝试最后备用方案:', {
+                                            status,
+                                            hasData: !!data?.data,
+                                            hasDataData: !!data?.data?.data,
+                                            fullData: JSON.stringify(data, null, 2).substring(0, 1000)
+                                        });
                                         
-                                        return { 
-                                            ...hItem, 
-                                            status: 'completed', 
-                                            progress: 100, 
-                                            url: primaryUrl,
-                                            width: w,
-                                            height: h,
-                                            durationMs,
-                                            errorMsg: null,
-                                            ...(imageUrls.length > 1 ? { mjImages: imageUrls, selectedMjImageIndex: 0 } : {})
+                                        // 最后备用方案：深度搜索整个响应对象，查找任何包含url的字段
+                                        const deepSearchForUrl = (obj, depth = 0) => {
+                                            if (depth > 5) return null; // 防止无限递归
+                                            if (!obj || typeof obj !== 'object') return null;
+                                            
+                                            // 检查当前对象是否有url字段
+                                            if (obj.url && typeof obj.url === 'string' && obj.url.startsWith('http')) {
+                                                return obj.url;
+                                            }
+                                            if (obj.image_url && typeof obj.image_url === 'string' && obj.image_url.startsWith('http')) {
+                                                return obj.image_url;
+                                            }
+                                            if (obj.imageUrl && typeof obj.imageUrl === 'string' && obj.imageUrl.startsWith('http')) {
+                                                return obj.imageUrl;
+                                            }
+                                            
+                                            // 递归搜索所有属性
+                                            for (const key in obj) {
+                                                if (obj.hasOwnProperty(key)) {
+                                                    const result = deepSearchForUrl(obj[key], depth + 1);
+                                                    if (result) return result;
+                                                }
+                                            }
+                                            
+                                            return null;
                                         };
+                                        
+                                        const foundUrl = deepSearchForUrl(data);
+                                        if (foundUrl) {
+                                            console.log('[Async Image] 通过深度搜索找到图片URL:', foundUrl);
+                                            const endTime = Date.now();
+                                            const durationMs = endTime - (hItem.startTime || endTime);
+                                            
+                                            // 更新预览窗口（使用保存的sourceNodeId）
+                                            // 即使savedSourceNodeId为空，也尝试调用updatePreviewFromTask，它会从history中查找
+                                            setTimeout(() => {
+                                                const nodeIdToUse = savedSourceNodeId || hItem.sourceNodeId;
+                                                console.log('[Async Image] 准备更新预览窗口（深度搜索）', { 
+                                                    taskId, 
+                                                    url: foundUrl, 
+                                                    sourceNodeId: nodeIdToUse,
+                                                    savedSourceNodeId,
+                                                    hItemSourceNodeId: hItem.sourceNodeId
+                                                });
+                                                updatePreviewFromTask(taskId, foundUrl, 'image', nodeIdToUse, null);
+                                            }, 200); // 延迟执行，确保history已更新
+                                            
+                                            return { 
+                                                ...hItem, 
+                                                status: 'completed', 
+                                                progress: 100, 
+                                                url: foundUrl,
+                                                width: w,
+                                                height: h,
+                                                durationMs,
+                                                errorMsg: null,
+                                                sourceNodeId: savedSourceNodeId || hItem.sourceNodeId // 确保sourceNodeId被保留
+                                            };
+                                        }
                                     }
-                                }
-                                // 如果没有图片，标记为失败
-                                return { 
-                                    ...hItem, 
-                                    status: 'failed', 
-                                    errorMsg: errorMsg || '任务完成但未返回图片' 
-                                };
-                            } else if (status === 'FAILED' || status === 'ERROR' || status === 'CANCELLED' || status === 'FAILURE') {
+                                    
+                                    // 如果所有方法都失败，标记为失败
+                                    return { 
+                                        ...hItem, 
+                                        status: 'failed', 
+                                        errorMsg: errorMsg || '任务完成但未返回图片，请检查控制台日志查看详细响应数据' 
+                                    };
+                                } else if (status === 'FAILED' || status === 'ERROR' || status === 'CANCELLED' || status === 'FAILURE') {
                                 // 任务失败
                                 return { 
                                     ...hItem, 
@@ -3518,7 +3662,10 @@
                             }
                         }
                         return hItem;
-                    }));
+                    });
+                    
+                    return updated;
+                });
 
                     // 如果任务未完成，继续轮询
                     // 对于慢任务，如果已经轮询了很多次，可以适当增加间隔
